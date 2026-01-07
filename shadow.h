@@ -8,13 +8,6 @@
 #include <linux/version.h>
 #include <linux/kprobes.h>
 
-/*
- * Hooking kernel functions using ftrace framework
- * 
- * v5.0: Dynamic Symbol Resolution for all ftrace functions
- * This version resolves ftrace core functions at runtime to bypass 
- * EXPORT_SYMBOL restrictions on some architectures (like ARM64).
- */
 
 /* Function pointer types for ftrace core functions */
 typedef int (*ftrace_set_filter_ip_t)(struct ftrace_ops *ops, unsigned long ip, int remove, int reset);
