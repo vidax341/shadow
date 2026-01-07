@@ -1,5 +1,5 @@
-#ifndef FTRACE_HELPER_H
-#define FTRACE_HELPER_H
+#ifndef SHADOW_H
+#define SHADOW_H
 
 #include <linux/ftrace.h>
 #include <linux/linkage.h>

