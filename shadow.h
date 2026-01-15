@@ -8,17 +8,20 @@
 #include <linux/version.h>
 #include <linux/kprobes.h>
 #include <linux/percpu.h>
+#include <linux/preempt.h>
 
 /* 
  * 递归保护机制
- * 使用 per-cpu 变量防止同一 CPU 上的无限递归
+ * 使用 per-cpu 变量配合禁止抢占，确保在钩子逻辑中不会发生重入
  */
 DECLARE_PER_CPU(int, shadow_recursion_guard);
 
 static inline bool shadow_enter_atomic(void) {
-    int *guard = get_cpu_ptr(&shadow_recursion_guard);
+    int *guard;
+    preempt_disable_notrace();
+    guard = this_cpu_ptr(&shadow_recursion_guard);
     if (*guard) {
-        put_cpu_ptr(&shadow_recursion_guard);
+        preempt_enable_notrace();
         return false;
     }
     *guard = 1;
@@ -28,7 +31,7 @@ static inline bool shadow_enter_atomic(void) {
 static inline void shadow_exit_atomic(void) {
     int *guard = this_cpu_ptr(&shadow_recursion_guard);
     *guard = 0;
-    put_cpu_ptr(&shadow_recursion_guard);
+    preempt_enable_notrace();
 }
 
 /* 
